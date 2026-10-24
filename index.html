@@ -6,9 +6,22 @@
 <title>My Chart</title>
 <style>
 html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:sans-serif}
-#bar{height:40px;display:flex;gap:8px;align-items:center;padding:0 8px}
-#chart{height:calc(100% - 40px)}
-select{background:#1e222d;color:#d1d4dc;border:1px solid #363a45;padding:4px;border-radius:4px}
+body{display:flex;flex-direction:column}
+#bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 8px}
+#tgl{display:flex;flex-wrap:wrap;gap:6px;padding:0 8px 6px}
+#wrap{position:relative;flex:1;min-height:0}
+#chart{position:absolute;inset:0}
+select,button{background:#1e222d;color:#d1d4dc;border:1px solid #363a45;padding:5px 8px;border-radius:4px;font-size:13px}
+button.on{background:#2962ff;border-color:#2962ff;color:#fff}
+#st{font-size:11px;color:#787b86}
+#stats{position:absolute;z-index:5;font-size:12px;border-collapse:collapse;background:rgba(19,23,34,.85);display:none}
+#stats td{border:1px solid #787b86;padding:3px 8px;color:#fff}
+#stats td:first-child{background:rgba(120,123,134,.35)}
+#stats.tl{top:8px;left:8px}
+#stats.tr{top:8px;right:70px}
+#stats.bl{bottom:34px;left:8px}
+#stats.br{bottom:34px;right:70px}
+#open{font-size:11px;color:#d1d4dc;padding:0 8px 4px;min-height:14px}
 </style>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -18,6 +31,8 @@ select{background:#1e222d;color:#d1d4dc;border:1px solid #363a45;padding:4px;bor
     <option>BTCUSDT</option>
     <option>ETHUSDT</option>
     <option>SOLUSDT</option>
+    <option>BNBUSDT</option>
+    <option>XRPUSDT</option>
   </select>
   <select id="tf">
     <option>1m</option>
@@ -27,47 +42,76 @@ select{background:#1e222d;color:#d1d4dc;border:1px solid #363a45;padding:4px;bor
     <option>4h</option>
     <option>1d</option>
   </select>
+  <select id="tpos">
+    <option value="tl">Top Left</option>
+    <option value="tr">Top Right</option>
+    <option value="bl">Bottom Left</option>
+    <option value="br" selected>Bottom Right</option>
+  </select>
+  <span id="st"></span>
 </div>
-<div id="chart"></div>
+<div id="tgl"></div>
+<div id="open"></div>
+<div id="wrap">
+  <div id="chart"></div>
+  <table id="stats" class="br"></table>
+</div>
 <script>
 const OFF = 23400; // Myanmar time +6:30
+const SOURCES = [
+  'https://fapi.binance.com/fapi/v1/klines',
+  'https://data-api.binance.vision/api/v3/klines'
+];
 
 const chart = LightweightCharts.createChart(document.getElementById('chart'), {
   autoSize: true,
   layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
   grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
-  timeScale: { timeVisible: true, secondsVisible: false }
+  timeScale: { timeVisible: true, secondsVisible: false },
+  crosshair: { mode: 0 }
 });
 
 const candleS = chart.addCandlestickSeries({
   upColor: '#26a69a', downColor: '#ef5350',
   borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
 });
-const e20 = chart.addLineSeries({ color: '#2962ff', lineWidth: 1, priceLineVisible: false });
-const e50 = chart.addLineSeries({ color: '#ff9800', lineWidth: 1, priceLineVisible: false });
-const e200 = chart.addLineSeries({ color: '#e91e63', lineWidth: 2, priceLineVisible: false });
-const stS = chart.addLineSeries({ lineWidth: 2, priceLineVisible: false });
 
-function ema(c, p) {
+/* ================= HELPERS ================= */
+function EMA(c, p) {
   const k = 2 / (p + 1);
   let e = null;
   return c.map(x => {
     e = e === null ? x.close : x.close * k + e * (1 - k);
-    return { time: x.time, value: e };
+    return e;
   });
 }
 
-function supertrend(c, p = 10, m = 3) {
+// Pine ta.atr (RMA of true range)
+function ATR(c, p) {
   const out = [];
-  let atr = 0, fu = 0, fl = 0, dir = 1;
+  let a = NaN, sum = 0;
+  for (let i = 0; i < c.length; i++) {
+    const x = c[i];
+    const pc = i ? c[i - 1].close : null;
+    const tr = i ? Math.max(x.high - x.low, Math.abs(x.high - pc), Math.abs(x.low - pc)) : x.high - x.low;
+    if (i < p - 1) { sum += tr; out.push(NaN); }
+    else if (i === p - 1) { sum += tr; a = sum / p; out.push(a); }
+    else { a = (a * (p - 1) + tr) / p; out.push(a); }
+  }
+  return out;
+}
+
+function SUPERTREND(c, p, m) {
+  const atr = ATR(c, p);
+  const out = [];
+  let fu = 0, fl = 0, dir = 1;
   for (let i = 0; i < c.length; i++) {
     const x = c[i];
     const pc = i ? c[i - 1].close : x.close;
-    const tr = i ? Math.max(x.high - x.low, Math.abs(x.high - pc), Math.abs(x.low - pc)) : x.high - x.low;
-    atr = i < p ? (i ? (atr * i + tr) / (i + 1) : tr) : (atr * (p - 1) + tr) / p;
+    const a = isNaN(atr[i]) ? 0 : atr[i];
     const hl2 = (x.high + x.low) / 2;
-    let u = hl2 + m * atr;
-    let l = hl2 - m * atr;
+    let u = hl2 + m * a;
+    let l = hl2 - m * a;
     if (i) {
       u = (u < fu || pc > fu) ? u : fu;
       l = (l > fl || pc < fl) ? l : fl;
@@ -75,55 +119,298 @@ function supertrend(c, p = 10, m = 3) {
       else if (dir === -1 && x.close > u) dir = 1;
     }
     fu = u; fl = l;
-    out.push({
-      time: x.time,
-      value: dir === 1 ? l : u,
-      color: dir === 1 ? '#26a69a' : '#ef5350'
-    });
+    out.push({ time: x.time, value: dir === 1 ? l : u, dir: dir });
   }
   return out;
 }
 
+function fmt(p) {
+  return p >= 100 ? p.toFixed(2) : (p >= 1 ? p.toFixed(4) : p.toFixed(6));
+}
+
+function newLine(color, width, showLabel) {
+  const s = chart.addLineSeries({
+    color: color, lineWidth: width || 1,
+    priceLineVisible: false, lastValueVisible: !!showLabel
+  });
+  s.applyOptions({ autoscaleInfoProvider: () => null }); // indicator lines don't squash candles
+  return s;
+}
+
+/* ================= INDICATOR SYSTEM =================
+Each indicator:
+  name  : button label
+  on    : default ON/OFF
+  init  : create series (this.s = [])
+  run(c): c = [{time,open,high,low,close,closed}]
+          set data on series, return optionally
+          { markers:[], stats:{rows:[[label,value,bg]], open:'text'} }
+  marker: { time, position:'belowBar'|'aboveBar', color, shape:'arrowUp'|'arrowDown'|'circle'|'square', text }
+=================================================== */
+const IND = [];
+
+/* ---------- R:R=1:3(2X) (Pine -> JS) ---------- */
+const CFG = {
+  fastLen: 20, slowLen: 50, thirdLen: 200,
+  fastColor: '#26a69a', slowColor: '#ffeb3b', thirdColor: '#ef5350',
+  bullColor: '#26a69a', bearColor: '#ef5350',
+  atrLen: 14, atrMult: 2.5, rr: 3.0,
+  showLines: true,
+  useGapFilter: true, gapMult: 1.0,
+  useGapFilter2: true, gapMult2: 0.5
+};
+
+IND.push({
+  name: 'R:R=1:3(2X)', on: true,
+  init() {
+    this.s = [
+      newLine(CFG.fastColor, 2), newLine(CFG.slowColor, 2), newLine(CFG.thirdColor, 2),
+      newLine('#2962ff', 1, true), newLine('#ef5350', 1, true), newLine('#26a69a', 1, true)
+    ];
+  },
+  run(c) {
+    const n = c.length;
+    const fast = EMA(c, CFG.fastLen), slow = EMA(c, CFG.slowLen), third = EMA(c, CFG.thirdLen);
+    const atr = ATR(c, CFG.atrLen);
+
+    this.s[0].setData(c.map((x, i) => ({ time: x.time, value: fast[i] })));
+    this.s[1].setData(c.map((x, i) => ({ time: x.time, value: slow[i] })));
+    this.s[2].setData(c.map((x, i) => ({ time: x.time, value: third[i] })));
+
+    const markers = [];
+    const dEntry = [], dSl = [], dTp = [];
+    let state = 0, entry = 0, sl = 0, tp = 0, entryBar = -1;
+    let wins = 0, losses = 0;
+
+    for (let i = 0; i < n; i++) {
+      const x = c[i];
+      let win = false, loss = false, closedNow = false;
+
+      if (state === 1 && i > entryBar) {
+        if (x.low <= sl) loss = true;
+        else if (x.high >= tp) win = true;
+      }
+      if (state === -1 && i > entryBar) {
+        if (x.high >= sl) loss = true;
+        else if (x.low <= tp) win = true;
+      }
+
+      if (win || loss) {
+        closedNow = true;
+        const isLong = state === 1;
+        markers.push({
+          time: x.time,
+          position: (isLong === win) ? 'aboveBar' : 'belowBar',
+          color: win ? '#26a69a' : '#ef5350',
+          shape: 'circle',
+          text: win ? 'WIN' : 'LOSS'
+        });
+        if (win) wins++; else losses++;
+        state = 0;
+      }
+
+      const a = atr[i];
+      if (i >= 1 && !isNaN(a) && state === 0 && !closedNow && x.closed !== false) {
+        const p = c[i - 1];
+        const bearRaw = p.close > p.open && x.open > x.close && x.open >= p.close &&
+                        p.open >= x.close && (x.open - x.close) > (p.close - p.open);
+        const bullRaw = p.open > p.close && x.close > x.open && x.close >= p.open &&
+                        p.close >= x.open && (x.close - x.open) > (p.open - p.close);
+
+        const bullAligned = fast[i] > slow[i] && slow[i] > third[i];
+        const bearAligned = fast[i] < slow[i] && slow[i] < third[i];
+        const gapOk1 = !CFG.useGapFilter || Math.abs(fast[i] - slow[i]) > a * CFG.gapMult;
+        const gapOk2 = !CFG.useGapFilter2 || Math.abs(slow[i] - third[i]) > a * CFG.gapMult2;
+        const gapOk = gapOk1 && gapOk2;
+        const top = Math.max(fast[i], slow[i]), bot = Math.min(fast[i], slow[i]);
+        const between = x.close >= bot && x.close <= top;
+
+        const bullSignal = bullRaw && bullAligned && gapOk && !between;
+        const bearSignal = bearRaw && bearAligned && gapOk && !between;
+        const slDist = a * CFG.atrMult;
+        const tpDist = slDist * CFG.rr;
+
+        if (bullSignal) {
+          state = 1; entry = x.close; sl = x.close - slDist; tp = x.close + tpDist; entryBar = i;
+          markers.push({ time: x.time, position: 'belowBar', color: CFG.bullColor, shape: 'arrowUp', text: 'BUY' });
+        } else if (bearSignal) {
+          state = -1; entry = x.close; sl = x.close + slDist; tp = x.close - tpDist; entryBar = i;
+          markers.push({ time: x.time, position: 'aboveBar', color: CFG.bearColor, shape: 'arrowDown', text: 'SELL' });
+        }
+      }
+
+      if (CFG.showLines && state !== 0) {
+        dEntry.push({ time: x.time, value: entry });
+        dSl.push({ time: x.time, value: sl });
+        dTp.push({ time: x.time, value: tp });
+      } else {
+        dEntry.push({ time: x.time });
+        dSl.push({ time: x.time });
+        dTp.push({ time: x.time });
+      }
+    }
+
+    this.s[3].setData(dEntry);
+    this.s[4].setData(dSl);
+    this.s[5].setData(dTp);
+
+    const total = wins + losses;
+    const winRate = total > 0 ? wins * 100 / total : 0;
+    const netR = wins * CFG.rr - losses;
+    const gray = 'rgba(120,123,134,.35)';
+    return {
+      markers: markers,
+      stats: {
+        rows: [
+          ['Total', String(total), gray],
+          ['Win', String(wins), 'rgba(38,166,154,.5)'],
+          ['Loss', String(losses), 'rgba(239,83,80,.5)'],
+          ['Win %', winRate.toFixed(2) + '%', 'rgba(41,98,255,.5)'],
+          ['Net R', (Math.round(netR * 100) / 100) + 'R', netR >= 0 ? 'rgba(38,166,154,.5)' : 'rgba(239,83,80,.5)']
+        ],
+        open: state === 0 ? '' :
+          (state === 1 ? 'BUY' : 'SELL') + '  Entry: ' + fmt(entry) + '  SL: ' + fmt(sl) + '  TP: ' + fmt(tp)
+      }
+    };
+  }
+});
+
+/* ---------- Supertrend (10, 3) ---------- */
+IND.push({
+  name: 'Supertrend', on: false,
+  init() { this.s = [newLine('#26a69a', 2)]; },
+  run(c) {
+    const st = SUPERTREND(c, 10, 3);
+    this.s[0].setData(st.map(x => ({
+      time: x.time, value: x.value,
+      color: x.dir === 1 ? '#26a69a' : '#ef5350'
+    })));
+    const m = [];
+    for (let i = 1; i < st.length; i++) {
+      if (st[i].dir !== st[i - 1].dir) {
+        m.push(st[i].dir === 1
+          ? { time: st[i].time, position: 'belowBar', color: '#26a69a', shape: 'arrowUp', text: 'ST BUY' }
+          : { time: st[i].time, position: 'aboveBar', color: '#ef5350', shape: 'arrowDown', text: 'ST SELL' });
+      }
+    }
+    return { markers: m };
+  }
+});
+
+/* ---------- MY INDICATOR (template - ကိုယ်ပိုင်ထပ်ရေးရန်) ---------- */
+IND.push({
+  name: 'My Ind', on: false,
+  init() { this.s = [newLine('#ffeb3b', 2)]; },
+  run(c) {
+    const e = EMA(c, 21);
+    this.s[0].setData(c.map((x, i) => ({ time: x.time, value: e[i] })));
+  }
+});
+
+/* ================= ENGINE ================= */
 let candles = [];
 let ws = null;
 
-function draw() {
-  e20.setData(ema(candles, 20));
-  e50.setData(ema(candles, 50));
-  e200.setData(ema(candles, 200));
-  stS.setData(supertrend(candles));
+const statsEl = document.getElementById('stats');
+const openEl = document.getElementById('open');
+
+function redraw() {
+  let markers = [];
+  let stats = null;
+  IND.forEach(ind => {
+    if (ind.on) {
+      const r = ind.run(candles);
+      if (r && r.markers) markers = markers.concat(r.markers);
+      if (r && r.stats) stats = r.stats;
+    } else {
+      ind.s.forEach(s => s.setData([]));
+    }
+  });
+  markers.sort((a, b) => a.time - b.time);
+  candleS.setMarkers(markers);
+
+  if (stats) {
+    statsEl.style.display = 'table';
+    statsEl.innerHTML = stats.rows.map(r =>
+      '<tr><td>' + r[0] + '</td><td style="background:' + r[2] + '">' + r[1] + '</td></tr>').join('');
+    openEl.textContent = stats.open;
+  } else {
+    statsEl.style.display = 'none';
+    openEl.textContent = '';
+  }
+}
+
+IND.forEach(ind => ind.init());
+
+const tgl = document.getElementById('tgl');
+IND.forEach(ind => {
+  const b = document.createElement('button');
+  b.textContent = ind.name;
+  b.className = ind.on ? 'on' : '';
+  b.onclick = () => {
+    ind.on = !ind.on;
+    b.className = ind.on ? 'on' : '';
+    redraw();
+  };
+  tgl.appendChild(b);
+});
+
+document.getElementById('tpos').onchange = e => { statsEl.className = e.target.value; };
+
+const st = document.getElementById('st');
+
+async function fetchKlines(s, t) {
+  for (const base of SOURCES) {
+    try {
+      const r = await fetch(base + '?symbol=' + s + '&interval=' + t + '&limit=1000');
+      if (!r.ok) continue;
+      const d = await r.json();
+      if (Array.isArray(d)) {
+        st.textContent = base.indexOf('fapi') > -1 ? 'Futures' : 'Spot';
+        return d;
+      }
+    } catch (e) {}
+  }
+  throw new Error('Binance data ရယူမရပါ (VPN စစ်ပါ)');
 }
 
 async function load() {
-  if (ws) ws.close();
+  if (ws) { ws.onmessage = null; ws.close(); }
   const s = document.getElementById('sym').value;
   const t = document.getElementById('tf').value;
+  st.textContent = 'Loading...';
   try {
-    const r = await fetch('https://fapi.binance.com/fapi/v1/klines?symbol=' + s + '&interval=' + t + '&limit=1000');
-    const d = await r.json();
-    candles = d.map(k => ({
+    const d = await fetchKlines(s, t);
+    candles = d.map((k, i) => ({
       time: k[0] / 1000 + OFF,
-      open: +k[1], high: +k[2], low: +k[3], close: +k[4]
+      open: +k[1], high: +k[2], low: +k[3], close: +k[4],
+      closed: i < d.length - 1
     }));
     candleS.setData(candles);
-    draw();
+    redraw();
     chart.timeScale().fitContent();
   } catch (e) {
-    alert('Data load error: ' + e.message);
+    st.textContent = e.message;
     return;
   }
-  ws = new WebSocket('wss://fstream.binance.com/ws/' + s.toLowerCase() + '@kline_' + t);
+  const fut = st.textContent === 'Futures';
+  const host = fut ? 'wss://fstream.binance.com/ws/' : 'wss://stream.binance.com:9443/ws/';
+  ws = new WebSocket(host + s.toLowerCase() + '@kline_' + t);
   ws.onmessage = ev => {
     const k = JSON.parse(ev.data).k;
     const c = {
       time: k.t / 1000 + OFF,
-      open: +k.o, high: +k.h, low: +k.l, close: +k.c
+      open: +k.o, high: +k.h, low: +k.l, close: +k.c,
+      closed: !!k.x
     };
     const last = candles[candles.length - 1];
     if (c.time === last.time) candles[candles.length - 1] = c;
-    else candles.push(c);
-    candleS.update(c);
-    draw();
+    else {
+      last.closed = true;
+      candles.push(c);
+    }
+    candleS.update({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close });
+    redraw();
   };
 }
 
